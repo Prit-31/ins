@@ -11,7 +11,7 @@ const PORT = 3000;
 
 // MongoDB config
 
-const MONGO_URI="mongodb+srv://prit:prIt#4@secureeye.3vnxtam.mongodb.net/?appName=SecureEye
+const MONGO_URI="mongodb+srv://prit:prIt#4@secureeye.3vnxtam.mongodb.net/?appName=SecureEye"
 const MONGO_DB = 'SecureEye';
 const COLLECTION_NAME = 'ins';
 
