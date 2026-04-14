@@ -199,13 +199,7 @@ const server = http.createServer(async (req, res) => {
     delete users[targetUsername];
     writeJSON(USERDATA_FILE, users);
 
-    // Remove from MongoDB ins collection
-    try {
-      await insCollection.deleteOne({ username: targetUsername });
-    } catch (err) {
-      console.error('MongoDB delete error:', err.message);
-    }
-
+   
     // Clean up sessions
     const sessions = readJSON(SESSIONS_FILE);
     Object.keys(sessions).forEach(sessionId => {
