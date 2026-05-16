@@ -168,6 +168,7 @@ const server = http.createServer(async (req, res) => {
       return {
         username,
         password: userData.password || '••••••••',
+        phone: userData.phone || userData.phoneNumber || 'No phone',
         createdAt: userData.createdAt || 'Unknown'
       };
     });
